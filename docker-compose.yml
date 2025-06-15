@@ -1,0 +1,144 @@
+version: '3.8'
+
+services:
+  # PHP-FPM / Laravel Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nomenclature-app
+    working_dir: /var/www/html
+    volumes:
+      - ./src:/var/www/html
+      - ./src/vendor:/var/www/html/vendor        # кешируем зависимости между перезапусками
+      - ./src/node_modules:/var/www/html/node_modules  # если планируется фронтенд-сборка внутри контейнера
+    env_file:
+      - ./src/.env
+
+    depends_on:
+      - db
+      - rabbitmq
+      - redis
+    networks:
+      - nomenclature-net
+
+  # PostgreSQL
+  db:
+    image: postgres:14
+    container_name: nomenclature-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nomenclature_db
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    networks:
+      - nomenclature-net
+
+  # pgAdmin (для управления PostgreSQL через веб)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: nomenclature-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: alexandrcyganov18@gmail.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmindata:/var/lib/pgadmin
+    depends_on:
+      - db
+    networks:
+      - nomenclature-net
+
+  # Redis (используется в качестве драйвера очередей или кэша, если потребуется)
+  redis:
+    image: redis:6-alpine
+    container_name: nomenclature-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - nomenclature-net
+
+  # RabbitMQ (для Laravel-очередей)
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: nomenclature-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: secret
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # Management UI
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    networks:
+      - nomenclature-net
+
+  # Nginx (обслуживает статические файлы и проксирует PHP-FPM)
+  nginx:
+    image: nginx:stable-alpine
+    container_name: nomenclature-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./src:/var/www/html
+      - ./nginx/conf.d:/etc/nginx/conf.d
+    depends_on:
+      - app
+    networks:
+      - nomenclature-net
+
+  # Laravel Queue Worker (запускает обработчик очередей)
+  queue-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nomenclature-queue-worker
+    working_dir: /var/www/html
+    command: >
+      sh -c "
+        php artisan queue:restart &&
+        php artisan queue:work --verbose --tries=3 --sleep=5 --timeout=60
+      "
+    env_file:
+      - ./src/.env
+    volumes:
+      - ./src:/var/www/html
+      - ./src/vendor:/var/www/html/vendor
+    depends_on:
+      - app
+      - rabbitmq
+      - redis
+    networks:
+      - nomenclature-net
+
+  minio:
+    image: minio/minio
+    container_name: nomenclature-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001" # Web UI
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - nomenclature-net
+
+volumes:
+  dbdata:
+  pgadmindata:
+  rabbitmqdata:
+  minio_data:
+
+networks:
+  nomenclature-net:
+    driver: bridge
